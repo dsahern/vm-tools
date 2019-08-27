@@ -1,0 +1,707 @@
+#!/bin/bash
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+IP='sudo ip'
+OVSCTL="/usr/local/bin/ovs-vsctl"
+LOSETUP="sudo losetup"
+TAPDEVS=
+
+EHCI_ARG="-device usb-ehci,id=ehci"
+
+################################################################################
+#
+# show usage for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} OPTS profile
+
+Optional settings:
+	-c path   add cdrom argument. path can be cdrom device or iso path
+			  (e.g., -c /dev/cdrom  or -c /path/to/file.iso)
+
+	-b dev    boot order for VM (e.g., -b dc to boot from cd then first disk)
+
+	-r        do not allow guest to reboot - converts reboot to a shutdown
+
+	-p        pause VM at startup (use vm-resume to start execution)
+
+	-d        dry-run. Show full qemu command that would be launched.
+
+	-k file   linux kernel (vmlinuz) to boot
+
+	-i file   initrd to use at boot of linux kernel
+
+	-a args   arguments to pass to linux kernel
+
+	-f file   add a floppy disk image
+
+	-o        Disable offload (needed for xdp tests for example)
+
+	-h        use hugepages for VM
+USE
+}
+
+################################################################################
+#
+# action to take on a terminate
+
+function netdev_cleanup
+{
+	local br=$1
+	local dev=$2
+
+	$IP link del dev $dev
+	if [ -n "$br" -a "$USE_OVS" = "yes" ]
+	then
+		$OVSCTL del-port $br $dev
+	fi
+}
+
+function cleanup
+{
+	local d
+	local t
+	local b
+
+	# should be set of bridge,tap entries
+	for d in ${TAPDEVS}
+	do
+		b=${d/,*}
+		t=${d/*,}
+		netdev_cleanup "$b" "$t"
+	done
+
+	rm -f ${SOCKDIR}/${profile} ${PIDDIR}/${profile}.pid
+}
+
+# sig handler
+function cleanup_exit1
+{
+	cleanup
+	exit 1
+}
+
+
+################################################################################
+#
+# determine if input is a valid mac address: 
+# 6 2-character sets, separated by ':' using only 0-9 and a-f
+
+function valid_mac
+{
+	local mac=$1
+
+	o6=$(echo $mac | awk -F':' '{print $6}')
+	[ -z "$o6" ] && return 1
+
+	#mac1=${mac//:/}
+	#mac2=$(echo ${mac1} | tr -c -d [0-9a-fA-F])
+	#[ "$mac1" != "$mac2" ] && return 1
+	
+	return 0
+}
+
+
+################################################################################
+#
+# network functions
+
+function initialize_net
+{
+	local br
+	local mac
+	local model
+	local ip
+	local modarg
+	local dev
+	local nnet=$1
+
+	OIFS=$IFS
+	IFS=','
+	set -- $2
+	IFS=$OIFS
+
+	br=$1
+	mac=$2
+	model=$3
+	ip=$4
+
+	valid_mac $mac
+	[ $? -ne 0 ] && return 1
+
+	dev=vm${VMID}-eth${nnet}
+	$IP tuntap add mode tap dev $dev user $VMUSER vnet_hdr multi_queue
+	if [ $? -ne 0 ]
+	then
+		err "failed to allocate tap device for $profile"
+		return 1
+	fi
+
+	$IP link set $dev up
+	if [ $? -ne 0 ]
+	then
+		err "failed to bringup tap device $dev for $profile"
+		$IP tuntap del mode tap dev $dev
+		return 1
+	fi
+	[ -n "$ip" ] && ip addr add dev $dev $ip
+
+	if [ -n "$br" ]
+	then
+		if [ "$br" = "main" ]
+		then
+			br=$MAINBR
+		elif [ "$br" = "host" ]
+		then
+			br=$HOSTBR
+		fi
+
+		if [ "$USE_OVS" = "yes" ]
+		then
+			$OVSCTL add-port $br $dev
+		else
+			$IP li sh dev $br >/dev/null 2>&1
+			if [ $? -ne 0 ]; then
+				$IP link add $br type bridge
+				$IP link set $br up
+			fi
+			$IP link set $dev master $br
+		fi
+		if [ $? -ne 0 ]
+		then
+			err "failed to add tap device to $br bridge for $profile"
+			$IP tuntap del mode tap dev $dev
+			return 1
+		fi
+	fi
+
+	TAPDEVS="$TAPDEVS $br,$dev"
+
+	# if model not specified use e1000 by default
+	model=${model:=e1000}
+
+	if [ "$model" = "virtio" ]
+	then
+		if [ -e /dev/vhost-net -a "$USE_VHOST" != "no" -a "$QEMU" != "yes" ]
+		then
+			modarg=",vhost=on,queues=8"
+			devarg=",mq=on"
+		fi
+		model=virtio-net-pci
+		# settings for XDP
+		if [ "${OFFLOAD}" = "no" ]; then
+			# other disable options:
+			#   gso=off,guest_tso4=off,guest_tso6=off
+			#   guest_ecn=off,guest_ufo=off,csum=off
+			devarg="${devarg},guest_csum=off"
+		fi
+		[ -n "$devarg" ] && devarg="${devarg},"
+	fi
+
+	NETARG="${NETARG} -netdev type=tap${modarg},ifname=${dev},script=no,downscript=no,id=netdev${nnet} -device ${model},mac=${mac},netdev=netdev${nnet}${devarg}romfile="
+
+	return 0
+}
+
+
+################################################################################
+#
+# Set the /proc/<pid>/oom_adj file to "-17"
+
+function setVMOOMadj()
+{
+	local rc=1
+	local procId=$1
+	local fileName="/proc/$procId/oom_adj"
+	if [[ -f $fileName ]]; then
+		echo "-17" > $fileName
+		rc=$?
+	else
+		err "$fileName does not exist"
+	fi
+	return $rc
+}
+
+################################################################################
+# assign Host PCI device to VM
+
+function claim_pci_dev
+{
+	local pciid=$1
+	local domain=0000
+	local id
+
+	[ -z "$pciid" ] && return 1
+
+	local drv=$(lspci -s ${pciid} -k | awk '$0 ~ /Kernel driver in use:/ {print $NF}')
+	[ "$drv" = "pci-stub" ] && return 0
+
+	id=$(lspci -n | awk  '{if ($1 == "'${pciid}'") {print $3}}')
+	id=${id/:/ }
+	if [ -z "$id" ]
+	then
+		err "failed to find vendor-product id for PCI id \"$pciid\""
+		return 1
+	fi
+
+	echo "$id" > /sys/bus/pci/drivers/pci-stub/new_id
+	if [ $? -ne 0 ]
+	then
+		err "Failed to tell pci-stub about id \"$id\""
+		return 1
+	fi
+
+	echo "${domain}:${pciid}" > /sys/bus/pci/devices/${domain}:${pciid}/driver/unbind
+	if [ $? -ne 0 ]
+	then
+		err "Failed to unbind PCI device \"${domain}:${pciid}\""
+		return 1
+	fi
+
+	# pci-stub claims device so it can be assigned guest
+	echo "${domain}:${pciid}" > /sys/bus/pci/drivers/pci-stub/bind 
+	if [ $? -ne 0 ]
+	then
+		err "Failed to bind pci-stub to device \"${domain}:${pciid}\""
+		return 1
+	fi
+
+	return 0
+}
+
+# expecting format of HOSTPCIDEV to be device id followed by
+# command to run prior to launching qemu-kvm
+
+function handle_pci_devices
+{
+	declare -i idx=0
+	declare -i len=${#HOSTPCIDEV[0]}
+
+	while [ $len -gt 0 ]
+	do
+		d=${HOSTPCIDEV[idx]}
+		c=${HOSTPCIDEV[idx+1]}
+
+		claim_pci_dev $d
+		if [ $? -ne 0 ]
+		then
+			err "Failed to claim PCI device $d"
+			cleanup_exit1
+		fi
+
+		if [ -n "$c" ]
+		then
+			eval $c >&2
+			if [ $? -ne 0 ]
+			then
+				err "Failed to run command for PCI device $d"
+				cleanup_exit1
+			fi
+		fi
+
+		echo -n " -device pci-assign,host=$d"
+
+		idx=$((idx + 2))
+		len=${#HOSTPCIDEV[idx]}
+	done
+}
+
+################################################################################
+#
+# Since this function is called before starting the VM we need to wait for 
+# the VM to start.
+# Perform 10 iterations and sleep for N seconds for Nth iteration
+# Poll the vm framework for the new VM pid
+# Adjust the oom_adj value
+
+function OOMKWorker()
+{
+	local Profile=$1
+
+	[ $UID -ne 0 ] && exit
+
+	# ugly, but we need to give the VM time to start up
+	# no good way to know when its initializations (mainly threads)
+	# are done
+	sleep 10
+	pid=$(vm-status -b $Profile)
+	if [ $? -eq 0 -a "$pid" != "-" ]
+	then
+		# set oom score for all threads
+		ps -p $pid -L -o lwp --no-headers |\
+		while read p
+		do
+			setVMOOMadj $p
+		done
+	else
+		logger -t ${0##*/} "oom_adj value for $Profile was not set."
+	fi
+}
+
+
+################################################################################
+# 
+
+function is_disk_mounted
+{
+	local mnt
+	mnt=$($LOSETUP -j $1 | awk '{print $1}')
+	[ -n "$mnt" ] && return 0
+
+	return 1
+}
+
+################################################################################
+# utility functions
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+
+################################################################################
+# main
+
+CPUMODEL=host
+CDROMDEV=
+BOOTDEV="-boot order=cd"
+REBOOTOPT=
+DRYRUN=no
+PAUSE=
+KERNEL=
+INITRD=
+KARGS=
+FLOPPY=
+OFFLOAD=yes
+# we use raw qemu disk images
+DISKFMT=raw
+
+while getopts :c:b:rdpk:i:a:f:ho o
+do
+	case $o in
+		c) CDROMDEV="$OPTARG";;
+		b) BOOTDEV="-boot order=$OPTARG";;
+		r) REBOOTOPT="-no-reboot";; 
+		p) PAUSE="-S";;
+		d) DRYRUN=yes;;
+		k) KERNEL="-kernel $OPTARG";;
+		i) INITRD="-initrd $OPTARG";;
+		a) KARGS="-append \"$OPTARG\"";;
+		f) FLOPPY="$OPTARG";;
+		o) OFFLOAD=no;;
+		h) MEMPATH=/hugepages;;
+		*) usage; exit 1;;
+	esac
+done
+
+shift $(($OPTIND-1))
+profile=${1//.dat}
+if [ -z "$profile" ]
+then
+	usage
+	exit 1
+fi
+
+if [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+	err "profile \"$profile\" does not exist"
+	exit 1
+fi
+
+. ${VM_DIR}/${profile}.dat
+
+if [ "${VMUSER}" != "$USER" -a $UID -ne 0 ]
+then
+	err "You are not the owner of \"$profile\" and you are not root."
+	err "Cannot start VM."
+	exit 1
+fi
+if [ -z "$KERNEL" -a -n "$VMKERNEL" ]; then
+	KERNEL="-kernel $VMKERNEL"
+fi
+
+
+#
+# check linux specific boot arguments
+#
+if [ -z "$KERNEL" -a -n "$INITRD" ]
+then
+	err "use of initrd argument requires kernel to be specified"
+	exit 1
+elif [ -z "$KERNEL" -a -n "$KARGS" ]
+then
+	KARGS=
+fi
+
+DISKMODEL=${VMDISKMODEL:=scsi}
+
+if [ -z "$VMUSER" ]
+then
+	err "User not defined. VMs must be run as non-root user"
+	exit 1
+fi
+
+
+################################################################################
+#
+# See if this VM is already running
+
+status=$(vm-status -b $profile)
+if [ $? -eq 0 -a "$DRYRUN" != "yes" ]
+then
+	log "This VM ($profile) is already running (pid $status)."
+	exit 1
+fi
+
+#
+# make sure kvm is loaded
+#
+if [ ! -e /dev/kvm -a "$DRYRUN" != "yes" ]
+then
+	err "kvm module not loaded. Not starting $profile VM."
+	exit 1
+fi
+
+trap 'cleanup_exit1' SIGQUIT SIGTERM
+trap '' SIGINT SIGHUP
+
+################################################################################
+# handle running qemu (as opposed to qemu-kvm or qemu with -enable-kvm)
+
+if [ "$QEMU" = "yes" ]
+then
+	ACCEL="none"
+fi
+
+################################################################################
+# version based checks
+
+QEMUVER=$(${KVM} -version | awk '{print $4}')
+case "$QEMUVER" in
+	# 0.13, etc need boot=on for first disk
+	0.1*) 
+		[ "${ACCEL}" != "none" -a -z "$KERNEL" ] && BOOT=",boot=on"
+		EHCI_ARG=
+		;;
+
+	# not sure what release supports ehci; 1.5 does
+	1.[0-4]*) EHCI_ARG= ;;
+esac
+
+
+################################################################################
+# piece together kvm arguments
+
+#
+# Virtual disks
+#
+DISKARG=
+for d in ${VMDISKS}
+do
+	if [ ! -e ${d} ]
+	then
+		err "${d} does not exist" >&2
+		exit 1
+	fi
+
+	is_disk_mounted $d
+	if [ $? -eq 0 ]
+	then
+		echo "disk $d is mounted. Cannot start VM"
+		exit 1
+	fi
+
+	DISKARG="$DISKARG -drive file=${d},if=${DISKMODEL},cache=none${BOOT},format=${DISKFMT}"
+	# reset boot option for second disk and on
+	BOOT=
+done
+
+VIRTFS_ARG=
+for d in ${VMVIRTFS}
+do
+	VIRTFS_ARG="$VIRTFS_ARG -virtfs local,path=${d},security_model=none,mount_tag=node"
+done
+
+if [ -n "$FLOPPY" ]
+then
+	FLOPPY="-fda $FLOPPY"
+fi
+
+#
+# networks
+#
+NETARG=
+declare -i nnet=0
+for n in $VMNICS
+do
+	initialize_net ${nnet} ${n}
+	[ $? -ne 0 ] && cleanup_exit1
+	nnet=$((nnet+1))
+done
+
+
+#
+# serial port
+#
+for s in $VMSERIAL
+do
+	SEROPT="$SEROPT -serial $s"
+done
+
+
+#
+# cdrom from config file if not specified at command line
+# and make sure VM has proper permissions on file
+#
+[ -z "$CDROMDEV" -a -n "$VMCDROM" ] && CDROMDEV="$VMCDROM"
+if [ -n "$CDROMDEV" ]
+then
+	CDROMOPT="-cdrom $CDROMDEV"
+fi
+
+#
+# handle PCI devices to be passed through
+#
+if [ -n "$HOSTPCIDEV" ]
+then
+	PCIARG=$(handle_pci_devices)
+	if [ $? -ne 0 ]
+	then
+		cleanup_exit1
+	fi
+fi
+
+#
+# use unix sockets for qemu monitor
+#
+MONOPT="-monitor unix:${SOCKDIR}/${profile},server,nowait"
+
+
+#
+# is this setup using hugepages?
+#
+[ -n "$MEMPATH" ] && MEMPATHOPT="-mem-path ${MEMPATH}"
+
+
+#
+# VM resouce policies
+#
+[ -n "$VMAFFINITY" ] && TASKSETOPT="taskset $VMAFFINITY" 
+[ -n "$VMNICE" ] && NICEOPT="nice -n $VMNICE"
+
+
+#
+# display option - last b/c we might redirect stdin/stdout
+#
+case "$VMDISPLAY" in
+
+	# use ncurses on display
+	tty[0-9])
+	DISPOPT="-curses"
+	if [ "$DRYRUN" = "no" ]; then
+		exec </dev/${VMDISPLAY}
+		exec >/dev/${VMDISPLAY}
+	fi
+	;;
+
+	# using stdio for display
+	stdio) DISPOPT="-curses" ;;
+	
+	# using vnc display
+	[0-9]*) DISPOPT="-vnc :${VMDISPLAY} -name ${profile}-on-$(hostname)" ;;
+
+	# using SDL framebuffer
+	sdl|SDL) DISPOPT="-k en-us -no-quit" ;;
+
+	# no display
+	*) DISPOPT="-nographic" ;;
+esac
+
+[ "$VMUSB" = "yes" ] && USB="-usb $EHCI_ARG"
+	
+[ ${VMUSER} != "root" -a $UID -eq 0 ] && SUDOARG="sudo -u ${VMUSER}"
+
+[ -n "$CPUMODEL" ] && CPU="-cpu ${CPUMODEL}"
+
+[ "$BG" = "yes" ] && BG_ARG="-daemonize"
+
+# emulate mode means skip kvm
+if [ "${ACCEL}" != "none" -a "$QEMU" != "yes" ]
+then
+	# qemu-kvm ended with 1.2; from then on use qemu with -enable-kvm
+	${KVM} -version | grep -q qemu-kvm-devel
+	[ $? -ne 0 ] && MISC="$MISC -enable-kvm"
+fi
+
+################################################################################
+#
+# piece together full command to run
+#
+
+TMPFILE=$(mktemp /home/dsa/vm/tmp/cmd.XXXXXXXX) || exit 1
+cat > $TMPFILE <<EOF
+#!/bin/bash
+${NICEOPT} ${TASKSETOPT} ${SUDOARG} ${KVM} \\
+${REBOOTOPT} -m ${VMMEM} -smp ${VMCPUS} ${CPU} \\
+${DAEMONIZE} ${MISC} \\
+${DISKARG} \\
+${VIRTFS_ARG} \\
+${NETARG} \\
+${PCIARG} \\
+${USB} -pidfile ${PIDDIR}/${profile}.pid ${PAUSE} \\
+${MEMPATHOPT} ${CLOCKOPT} ${MONOPT} ${SEROPT} ${DISPOPT} \\
+${CDROMOPT} ${FLOPPY} ${BOOTDEV} -device virtio-rng-pci \\
+${KERNEL} ${INITRD} ${KARGS} \\
+${EXTRA_OPT}
+EOF
+
+if [ "$DRYRUN" = "yes" ]
+then
+	echo "would launch:"
+	cat $TMPFILE
+	rm -f $TMPFILE
+	cleanup
+	exit 0
+fi
+
+log "starting VM \"${profile}\""
+chmod 700 $TMPFILE
+if [ "$BG" = "yes" ]
+then
+	(
+	$TMPFILE
+	exit_rc=$?
+	log "${profile} terminated: rc=$exit_rc"
+	rm -f $TMPFILE
+	cleanup
+	) &
+else
+	$TMPFILE
+	exit_rc=$?
+	log "${profile} terminated: rc=$exit_rc"
+	rm -f $TMPFILE
+	cleanup
+fi
+
+exit 0
+
+# vim: noexpandtab

@@ -1,0 +1,120 @@
+#!/bin/bash
+
+# This script determines the status of a particular VM -- i.e,
+# whether it is running or not and if so, it's PID.
+
+VMTOOLSCONF=${VMTOOLSCONF:=/home/dsa/vm/vm-tools}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+###############################################################################
+#
+# help for this script
+
+function usage
+{
+	cat <<USE
+
+usage: ${0##*/} -b  profile
+
+USE
+}
+
+###############################################################################
+#
+function show_status
+{
+	local vm=$1
+	local pid=$2
+
+	if [ "$FULL" = "yes" ]
+	then
+		if [ -z "$pid" ]; then
+			echo "\"$vm\" is not running"
+		else
+			echo "\"$vm\" is running. Process id is $pid"
+		fi
+	else
+		[ -z "$pid" ] && pid='-'
+		echo $pid
+	fi
+}
+
+
+###############################################################################
+#
+# main
+
+FULL=yes
+while getopts :b o
+do
+	case $o in
+		b) FULL=no;;
+	esac
+done
+shift $((${OPTIND}-1))
+
+profile=$1
+if [ -z "$profile" ]
+then
+	usage
+	exit 1
+fi
+profile=${profile/.dat/}
+
+if [ ! -e ${VM_DIR}/${profile}.dat ]
+then
+	echo "No VM with that name." >&2
+	exit 1
+fi
+
+if [ ! -f ${PIDDIR}/${profile}.pid ]
+then
+	show_status "$profile" ""
+	exit 1
+fi
+
+#
+# pull process id from pid file
+#
+pid=$(cat ${PIDDIR}/${profile}.pid 2>/dev/null)
+set -- $pid
+pid=$1
+
+#
+# if empty, it's not running
+#
+if [ -z "$pid" ]
+then
+	show_status "$profile" ""
+	exit 1
+fi
+
+
+#
+# check that pid found in file still corresponds to active process
+#
+pname=$(ps -p $pid -o 'comm=' 2>/dev/null)
+if [ $? -ne 0 ]
+then
+	show_status "$profile" ""
+	exit 1
+fi
+case "$pname" in
+    ${KVM##*/}) :;;
+    qemu*) :;;
+    *) show_status "$profile" ""; exit 1;;
+esac
+
+#
+# tell user VM is running and its pid
+#
+show_status "$profile" "$pid"
+
+exit 0

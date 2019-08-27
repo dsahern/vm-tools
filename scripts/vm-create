@@ -1,0 +1,653 @@
+#!/bin/bash
+
+# This script is used to create a profile for a virtual machine.
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage()
+{
+	cat >&2 <<USE
+
+usage ${0##*/} OPTS name
+
+where 'name' is the name of the profile for this VM. The name should
+not contain "special" characters.
+
+Required inputs:
+	-m mem     amount of memory to allocate to VM
+
+	-c ncpus   number of virtual cpus to give to VM
+
+	-f disk    assign an existing file to a VM as a disk. "file" can be a block
+			   device such as /dev/sda. This option can be given multiple times
+			   to allocate multiple disks to the VM. The *first* disk is set as
+			   the boot disk. Alternatively, use the -F option to have disks
+			   created.
+
+	-F size    create a disk image with specified size (e.g., 8G)
+
+	-d desc    "short" (<20 character) description of VM; used in status
+			   displays
+
+Optional settings:
+	-b         create a NIC, and attach it to the main bridge
+			   (IP address must be assigned by admin of LAN)
+
+	-i         create a NIC, and attach it to the internal, host-only bridge
+			   (IP address on host-only LAN is assigned by vm-tools
+			    when VM is created)
+
+	-n         create a NIC, but do not attach it to any bridge
+
+	-B bridge  create a NIC and attach to given bridge (bridge must exist)
+
+	NOTE: Order is important! NICs for the VM are created in the order you
+		  specify when the VM is created. For example, "-b -i" puts the first
+		  NIC on the main bridge and the second NIC on the host-only bridge.
+		  "-i -b" creates them in the reverse order.
+
+	-u user    username under which to run this VM
+			   Users should be in the ${VMGRP} group to get access to
+			   /dev/kvm and commands for starting VM.
+
+	-N model   Use this device model for network devices. Default is $NICMODEL.
+			   Options are "${NICMODEL_OPTS}".
+
+	-D model   Use this device model for disk devices. Default is $DISKMODEL.
+			   Options are "${DISKMODEL_OPTS}".
+
+	-w         VM will run a variant of windows
+
+	-s dev     Add dev as a serial port
+
+	-g display  Specify "SDL", "tty[0-9]" or "VNC" for display
+
+	-C path    Attach specified path as a cdrom to VM
+
+	-U         Enable USB support
+
+	-9 path    Path to pass to VM using 9p virt fs
+USE
+}
+
+################################################################################
+#
+# sanity checks on input arguments. On failure, exit.
+
+function valid_name
+{
+	local name=$1
+	local name2=$(echo $name | tr -c -d '[:alnum:]-_.')
+	if [ "$name2" != "$name" ]
+	then
+		err "invalid profile name. try again"
+		exit 1
+	elif [ ${#name} -gt 24 ]
+	then
+		err "pick a shorter profile name (24 characters or less)."
+		exit 1
+	fi
+
+	return 0
+}
+
+
+function valid_desc
+{
+	local desc=$1
+
+	# allow only alpha-numeric characters plus space and simple punctuation
+	local desc2=$(echo $desc | tr -c -d '[:alnum:][ -_.,]')
+	if [ "$desc2" != "$desc" ]
+	then
+		err "invalid description -- can only contain alpha-numeric characters."
+		exit 1
+	elif [ ${#name} -gt 20 ]
+	then
+		err "pick a shorter shorter description (20 characters or less)."
+		exit 1
+	fi
+
+	return 0
+}
+
+
+function valid_disk
+{
+	local file=$1
+
+	if [ ! -e $file ]
+	then
+		if [ -e ${IMGDIR}/${file} ]
+		then
+			file=${IMGDIR}/${file}
+		else
+			err "$file does not exist. Disk images need to already exist."
+			exit 1
+		fi
+	fi
+
+	# make path absolute
+	[ ${file:0:1} != "/" ] && file="${PWD}/${file}" 
+	if [ ! -e $file ]
+	then
+		err "huh? $file does not exist at check 2"
+		exit 1
+	fi
+
+	echo ${file}
+
+	return 0
+}
+
+
+function valid_disk_sz
+{
+	case "$1" in
+		[1-9]*) : ;;
+		*) err "invalid size for disk creation"; exit 1;;
+	esac
+
+	echo $1
+	return 0
+}
+
+
+
+function create_disk
+{
+	local size=$1
+	local file
+	local imgdir=${IMGDIR}/${NAME}
+
+	mkdir -p ${imgdir}
+	for n in $(seq 1 32)
+	do
+		[ -e ${imgdir}/disk-${n}.img ] && continue
+		file=${imgdir}/disk-${n}.img
+		break
+	done
+
+	if [ -z "$file" ]
+	then
+		err "Odd failure in create_disk -- too many disks allocated to this VM?"
+		exit 1
+	fi
+
+	qemu-img create -f raw ${file} "${size}" >/dev/null 2>&1
+	if [ $? -ne 0 ]
+	then
+		err "failed to create disk image for size ${size}"
+		exit 1
+	fi
+	chown ${VMUSER}:${VM_GRP} ${file}
+
+	echo ${file}
+
+	return 0
+}
+
+
+function valid_user
+{
+	local user=$1
+
+	id $user >/dev/null 2>&1
+	if [ $? -ne 0 ]
+	then
+		err "specified user does not exist."
+		exit 1
+	fi
+
+	grps=$(id -Gn $user)
+	for g in $grps
+	do
+		[ "$g" = "$VM_GRP" ] && return 0
+	done
+
+	echo "\"$user\" is not a member of the group \"$VM_GRP\""
+	exit 1
+}
+
+
+function valid_nicmodel
+{
+	local nic=$1
+
+	for n in $NICMODEL_OPTS
+	do
+		[ $n = $nic ] && return 0
+	done
+
+	err "invalid NIC model."
+	exit 1 
+}
+
+function valid_mainbr
+{
+	if [ "$ON_MAINBR" = "yes" ]
+	then
+		echo "Main bridge connection already specified. Limited to 1" >&2
+		exit 1
+	fi
+
+	ON_MAINBR=yes
+
+	return 0
+}
+
+function valid_hostbr
+{
+	if [ "$ON_HOSTBR" = "yes" ]
+	then
+		echo "Host-only bridge connection already specified. Limited to 1" >&2
+		exit 1
+	fi
+
+	ON_HOSTBR=yes
+
+	return 0
+}
+
+function valid_nobr
+{
+	return 0
+}
+
+function valid_diskmodel
+{
+	local disk=$1
+
+	for d in $DISKMODEL_OPTS
+	do
+		[ $d = $disk ] && return 0
+	done
+
+	err "invalid disk model."
+	exit 1 
+}
+
+function serial_port_dev
+{
+	local str=$1
+	local vmid=$2
+	local port=$((7000 + 10#${vmid}))
+	local sp
+	case "$str" in
+		stdio)  sp=stdio;;
+		telnet) sp=telnet::${port},server,nowait;;
+		tcp)    sp=tcp::${port},server,nowait;;
+		*)      sp=${str};;
+	esac
+
+	echo $sp
+}
+
+################################################################################
+#
+# functions for creating a new VM
+
+function find_vmid
+{
+	declare -i idx=1
+	for idx in $(seq 1 99)
+	do
+		idx2=$(printf "%02d" $idx)
+		egrep -q "VMID=${idx2}" ${VM_DIR}/*.dat > /dev/null 2>&1
+		if [ $? -ne 0 ]
+		then
+			echo "${idx2}"
+			return 0
+		fi
+	done
+
+	err "failed to find an unsed VMID"
+	exit 1
+}
+
+
+function generate_macaddr
+{
+	macgen.py
+}
+
+
+function create_user
+{
+	local vmid=$1
+	local name
+	local msg
+
+	if [ $UID -ne 0 ]
+	then
+		name=$(id -un)
+		if [ $? -ne 0 -o -z "$name" ]
+		then
+			err "failed to look up your user name"
+			return 1
+		fi
+	else
+		name="${VM_USER}${vmid}"
+		msg=$(vm-user -c $name 2>&1)
+		if [ $? -ne 0 ]
+		then
+			err "vm-user failed: $msg"
+			return 1
+	   fi
+	fi
+
+	echo $name
+
+	return 0
+}
+
+function add_nic_mainbr
+{
+	local mac
+
+	valid_mainbr
+	
+	mac=$(generate_macaddr)
+	NICS="$NICS main,$mac,$NICMODEL"
+}
+
+function add_nic_hostbr
+{
+	local mac
+
+	valid_hostbr
+	
+	mac="02:11:22:33:44:$VMID"
+
+	NICS="$NICS $HOSTBR,$mac,$NICMODEL"
+}
+
+function add_nic_nobr
+{
+	local mac
+
+	valid_nobr
+	
+	mac="02:12:34:56:78:$VMID"
+
+	NICS="$NICS ,$mac,$NICMODEL"
+}
+
+# add NIC to "other" bridge 
+function add_nic_bridge
+{
+	local br=$1
+	local mac
+
+	if [ "$br" = "$HOSTBR" -o "$br" = "host" ]
+	then
+		valid_hostbr
+	elif [ "$br" = "$MAINBR" ]
+	then
+		valid_mainbr
+	fi
+
+	mac=$(generate_macaddr)
+	NICS="$NICS $br,$mac,$NICMODEL"
+}
+
+################################################################################
+#
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+################################################################################
+#
+# main
+
+declare -i MEM=0
+declare -i NCPUS=0
+DISK_LIST=
+DESC=
+VMUSER=
+ON_MAINBR=no
+ON_HOSTBR=no
+ON_NOBR=no
+NETORDER=
+WINVM=no
+SERIAL_PORT=
+CDROM=
+DISPLAY="VNC"
+USB=no
+VMCPUMODEL="host,+x2apic"
+NICS=
+VIRTFS=
+
+# VMID needs to be done before processing NIC arguments
+# (TO-D: need to protect against multiple simultaneous users)
+VMID=$(find_vmid)
+
+while getopts :m:c:f:F:d:binu:N:D:ws:g:C:UB:9: o
+do
+	case $o in
+		m) MEM=$OPTARG;;
+		c) NCPUS=$OPTARG;;
+		f) DISK_LIST="$DISK_LIST $(valid_disk $OPTARG)";;
+		F) DISK_LIST="$DISK_LIST $(valid_disk_sz $OPTARG)";;
+		d) DESC=$OPTARG; valid_desc $DESC;;
+		u) VMUSER=$OPTARG; valid_user $VMUSER;;
+
+		b) add_nic_mainbr;;
+		i) add_nic_hostbr;;
+		n) add_nic_nobr;;
+		B) add_nic_bridge $OPTARG;;
+
+		# swap out model for existing nics
+		N) valid_nicmodel $OPTARG
+		   NICS=${NICS//$NICMODEL/$OPTARG}
+		   NICMODEL=$OPTARG
+		   ;;
+
+		D) DISKMODEL=$OPTARG; valid_diskmodel $DISKMODEL;;
+		w) WINVM=yes;;
+		s) SERIAL_PORT="$SERIAL_PORT $OPTARG";;
+		g) DISPLAY=$OPTARG;;
+		C) CDROM=$OPTARG;;
+		U) USB=yes;;
+		9) VIRTFS="$VIRTFS $OPTARG";;
+		*) usage; exit 1;;
+	esac
+done
+shift $((${OPTIND}-1))
+
+if [ -z "$1" -o -n "$2" ]
+then
+	usage
+	exit 1
+fi
+NAME=$1
+
+valid_name "$NAME"
+
+PROFILE=$VM_DIR/$NAME.dat 
+if [ -e $PROFILE ]
+then
+	err "profile already exists"
+	exit 1
+fi
+
+# need VMUSER set before creating disk image
+if [ -z "$VMUSER" ] 
+then 
+	if [ $UID -eq 0 ]
+	then
+		VMUSER=$(create_user $VMID)
+		[ $? -ne 0 ] && exit 1
+	else
+		VMUSER=$(id -un)
+	fi
+fi
+
+if [ $MEM -eq 0 ]
+then
+	err "no memory allocated to VM"
+	exit 1
+elif [ $NCPUS -eq 0 ]
+then
+	err "no cpus allocated to VM"
+	exit 1
+elif [ -z "$DISK_LIST" ]
+then
+	err "no disks allocated to VM"
+	exit 1
+fi
+
+# create any disk images requested
+for d in $DISK_LIST
+do
+	if [ ! -f ${d} ]
+	then
+		d=$(create_disk ${d})
+		[ $? -ne 0 ] && exit 1
+	fi
+	if [ -z "${DISKS}" ]
+	then
+		DISKS="${d}"
+	else
+		DISKS="${DISKS} ${d}"
+	fi
+done
+
+if [ $WINVM = "yes" ]
+then
+	EXTRA_OPT="$EXTRA_OPT -usbdevice tablet -tdf"
+	VMCPUMODEL=
+fi
+
+# create one or more serial ports
+for s in $SERIAL_PORT
+do
+	sdev=$(serial_port_dev $s $VMID)
+	if [ -z "$SERIAL_DEV" ]
+	then
+		SERIAL_DEV="$sdev"
+	else
+		SERIAL_DEV="$SERIAL_DEV $sdev"
+	fi
+done
+
+# Set up VMDISPLAY from argument
+case "$DISPLAY" in 
+	SDL|sdl) VMDISPLAY="SDL";;
+	tty*)    VMDISPLAY=$DISPLAY;;
+	VNC|vnc) VMDISPLAY=$VMID;;
+	stdio)   VMDISPLAY=stdio;;
+	none)   VMDISPLAY=none;;
+	*) err "Bad display $DISPLAY"; exit 1 ;;
+esac
+
+cat > $PROFILE <<VMD
+DESC="$DESC"
+
+VMID=${VMID}
+
+VMCPUS=${NCPUS}
+VMMEM=${MEM}
+
+VMNICS="${NICS}"
+
+VMDISKMODEL=${DISKMODEL}
+VMDISKS="${DISKS}"
+
+VMVIRTFS="${VIRTFS}"
+
+# serial device to add to VM (e.g., /dev/ttyS0)
+VMSERIAL="${SERIAL_DEV}"
+
+# path to a cdrom for VM
+VMCDROM=${CDROM}
+
+# enable usb support?
+VMUSB=$USB
+
+# cpu model defaults to 'host'; windows does not like that
+# so best to use default
+CPUMODEL=${VMCPUMODEL}
+
+# where to put console for VM
+VMDISPLAY=${VMDISPLAY}
+
+# taskset value
+VMAFFINITY=
+
+# nice adjustment
+VMNICE=
+
+VMUSER=${VMUSER}
+
+EXTRA_OPT="\${EXTRA_OPT} ${EXTRA_OPT}"
+VMD
+
+if [ $? -ne 0 ]
+then
+	err "Failed to create profile"
+	exit 1
+fi
+
+log "Successfully created VM $NAME"
+
+# if VM is tied to host-only bridge, configure dnsmasq
+if [ "$ON_HOSTBR" = "yes" -a -x ${VMTOOLS}/configure-dnsmasq.sh ]
+then
+	sudo ${VMTOOLS}/configure-dnsmasq.sh -a ${NAME}
+fi
+
+case "$DISPLAY" in 
+	SDL|sdl)
+		echo
+		echo "This VM will use SDL for its console."
+		echo
+		;;
+	tty*)
+		echo
+		echo "This VM will use $DISPLAY for its console."
+		echo
+		;;
+	stdio)
+		echo
+		echo "This VM will use stdio for its console."
+		echo
+		;;
+	VNC|vnc)
+		declare -i port=5900
+		echo
+		echo "Console access to VM will be available by connecting "
+		echo "a vncviewer to $(hostname):$(($port + 10#${VMID}))"
+		echo
+		;;
+	none)
+		echo
+		echo "This VM has no graphical console."
+		echo
+		;;
+esac
+
+exit 0
+
+# vim: noexpandtab

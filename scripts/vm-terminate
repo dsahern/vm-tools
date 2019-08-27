@@ -1,0 +1,114 @@
+#!/bin/bash
+
+# Command to terminate a VM host side
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} [-f|-r|-c] profile
+
+    -f    force quit using kill
+    -r    system_reset command
+    -c    try ctrl-alt-delete instead of ACPI power-down event
+
+normally system_powerdown command is sent which should initiate a
+powerdown is the VM (ACPI aware guests). If that does not work try
+a system_reset. The force option should only be used as a last
+resort.
+USE
+}
+
+
+################################################################################
+# send messages to user and syslog
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+
+################################################################################
+# main
+
+force=no
+reset=no
+try_cad=no
+
+while getopts :frc o
+do
+	case $o in
+		f) force=yes;;
+		r) reset=yes;;
+		c) try_cad=yes;;
+		*) usage; exit 1;;
+	esac
+done
+shift $(($OPTIND-1))
+
+profile=$1
+
+if [ -z "$profile" ]
+then
+    usage
+    exit 1
+elif [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+    err "profile \"$profile\" does not exist."
+    exit 1
+fi
+
+# make sure VM is running
+pid=$(vm-status -b ${profile} 2>&1)
+if [ $? -eq 1 ]
+then
+	log "\"$profile\" is not running."
+	exit 0
+fi
+
+
+#
+# send reboot/powerdown request via QEMU monitor
+#
+
+if [ "$force" = "yes" ]
+then
+    log "Force killing guest per user request"
+    kill -9 $pid
+
+elif [ "$reset" = "yes" ]
+then
+    log "Sending reset event to ${profile}"
+    qmoncmd.py -s ${SOCKDIR}/${profile} -c system_reset
+
+elif [ "$try_cad" = "yes" ]
+then
+	log "Sending ctrl-alt-delete sequence to ${profile}"
+	qmoncmd.py -s ${SOCKDIR}/${profile} -c 'sendkey ctrl-alt-delete'
+else
+    log "Sending powerdown event to ${profile}"
+    qmoncmd.py -s ${SOCKDIR}/${profile} -c system_powerdown
+fi
+
+exit 0

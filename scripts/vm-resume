@@ -1,0 +1,68 @@
+#!/bin/bash
+
+# Command to resume a paused VM
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} profile
+USE
+}
+
+
+################################################################################
+# send messages to user and syslog
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+
+################################################################################
+# main
+
+profile=$1
+if [ -z "$profile" ]
+then
+    usage
+    exit 1
+elif [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+    err "profile \"$profile\" does not exist."
+    exit 1
+fi
+
+# make sure VM is running
+pid=$(vm-status -b ${profile} 2>&1)
+if [ $? -eq 1 ]
+then
+	log "\"$profile\" is not running."
+	exit 0
+fi
+
+
+qmoncmd.py -s ${SOCKDIR}/${profile} -c 'c'
+
+exit 0

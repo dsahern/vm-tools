@@ -1,0 +1,130 @@
+#!/bin/bash
+
+# This script is used to free resources allocated to a VM and destroy
+# the profile.
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+################################################################################
+# utility functions
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+
+################################################################################
+# see if a user name is used by any other profiles
+# returns 1 if in use; 0 if not
+
+function check_userid
+{
+    local user=$1
+    local skip=$2
+    local str="VMUSER=$user"
+
+    cd ${VM_DIR}
+    for f in *.dat
+    do
+	[ "${f//.dat}" = "$skip" ] && continue
+        egrep -q "^${str}\$" $f
+        [ $? -eq 0 ] && return 1
+    done
+
+    return 0
+}
+
+###############################################################################
+#
+# main
+
+FORCE=no
+if [ "$1" = "-f" ]
+then
+	FORCE=yes
+	shift
+fi
+
+profile=${1//.dat}
+if [ -z "$profile" ]
+then
+	echo "usage: ${0##*/} <profile>" >&2
+	exit 1
+elif [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+	echo "${profile} does not exist" >&2
+	exit 1
+fi
+. ${VM_DIR}/${profile}.dat
+
+
+#
+# give the user a chance to bail before data is destroyed
+#
+if [ "$FORCE" != "yes" ]
+then
+	echo -n "are you sure you want to destroy $profile? [y/N] "
+	read ans
+	ans=${ans:0:1}
+	if [ "$ans" != "y" -a "$ans" != "Y" ]
+	then
+		echo "you did not answer y."
+		exit 1
+	fi
+fi
+
+
+# make sure VM is not running
+vm-status ${profile} >/dev/null 2>&1
+if [ $? -eq 0 ]
+then
+	log "VM is still running." >&2
+	exit 1
+fi
+
+# make sure it's pid file is removed
+rm -f ${PIDDIR}/${profile}.pid
+
+
+# clean up images
+for d in ${VMDISKS}
+do
+	if [ -b "$d" ]
+	then
+		log "$d is a block device. skipping."
+	elif [ -f "$d" ]
+	then
+		log "removing $d"
+		rm -f $d
+	fi
+done
+
+
+# delete user if not in use by other VMs
+check_userid $VMUSER ${profile}
+[ $? -eq 0 ] && vm-user -d ${VMUSER}
+
+if [ -e ${VMTOOLS}/configure-dnsmasq.sh ]; then
+sudo ${VMTOOLS}/configure-dnsmasq.sh -d ${profile}
+fi
+
+rm -rf ${VM_DIR}/${profile}.dat ${IMGDIR}/${profile}
+
+log "${profile} has been destroyed."
+
+exit 0

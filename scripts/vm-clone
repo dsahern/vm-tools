@@ -1,0 +1,185 @@
+#!/bin/bash
+
+# Command to clone a VM
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} old-profile new-profile
+USE
+}
+
+
+################################################################################
+# send messages to user and syslog
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+################################################################################
+# help for this script
+
+function usage()
+{
+    cat >&2 <<USE
+
+usage ${0##*/} OPTS name
+
+    -d desc    "short" (<20 character) description of VM; used in status
+               displays
+USE
+}
+
+################################################################################
+# main
+
+NEW_DESC=
+
+while getopts :d: o
+do
+    case $o in
+	d) NEW_DESC="$OPTARG";;
+	*) usage; exit 1;;
+    esac
+done
+shift $(($OPTIND-1))
+
+PROFILE=$1
+NEWPROFILE=$2
+if [ -z "$PROFILE" -o -z "$NEWPROFILE" ]
+then
+	usage
+	exit 1
+elif [ ! -f ${VM_DIR}/${PROFILE}.dat ]
+then
+	err "PROFILE \"$PROFILE\" does not exist."
+	exit 1
+fi
+
+# make sure VM is not running
+pid=$(vm-status -b ${PROFILE} 2>&1)
+if [ $? -eq 0 ]
+then
+	log "\"$PROFILE\" is running. Cannot clone a running VM."
+	exit 1
+fi
+
+
+# load data for existing PROFILE
+. ${VM_DIR}/${PROFILE}.dat
+
+#
+# copy disk images
+#
+for d in ${VMDISKS}
+do
+	if [ ! -e $d ]
+	then
+		err "image $d from ${PROFILE} does not exist" >&2
+		exit 1
+	fi
+done
+
+dir=${IMGDIR}/${NEWPROFILE}
+mkdir -p ${dir}
+for d in ${VMDISKS}
+do
+	for n in $(seq 1 32)
+	do
+		[ -e ${dir}/disk-${n}.img ] && continue
+		dcopy=${dir}/disk-${n}.img
+		break
+	done
+
+	if [ -z "$dcopy" ]
+	then
+		err "Odd failure -- too many disks allocated to this VM?"
+		exit 1
+	fi
+
+	echo "copying disk ${d} to ${dcopy}"
+	rm -f ${dcopy}
+	cp --sparse=always ${d} ${dcopy}
+	if [ $? -ne 0 ]
+	then
+		err "failed to copy ${d} to ${dcopy}"
+		exit 1
+	fi
+
+	DISKARG="-f ${dcopy}"
+done
+
+case $VMDISPLAY in
+	$VMID) DISPLAY=vnc;;
+	*) DISPLAY=$VMDISPLAY;;
+esac
+
+#
+# handle network settings
+#
+NETARG=
+OIFS=$IFS
+for n in $VMNICS
+do
+	IFS=,
+	set -- $n
+	IFS=$OIFS
+	br=$1
+	mac=$2
+	VMNICMODEL=$3
+
+	if [ "$br" = "main" ]
+	then
+		NETARG="${NETARG} -b"
+	elif [ -z "$br" ]
+	then
+		NETARG="${NETARG} -n"
+	else
+		NETARG="${NETARG} -B $br"
+	fi
+done
+
+for s in $VMSERIAL
+do
+	case $s in
+		telnet*) SERARG="$SERARG -s telnet" ;;
+		*) SERARG="$SERARG -s $s";;
+	esac
+done
+
+[ "$VMUSB" = "yes" ] && USB="-U"
+
+[ "$UID" != "0" ] && VMUSER=$USER
+
+if [ -z "$NEW_DESC" ]
+then
+	NEW_DESC="clone of ${PROFILE}"
+fi
+
+export EXTRA_OPT
+exec vm-create ${DISKARG} ${NETARG} ${SERARG} -D ${VMDISKMODEL} -N ${VMNICMODEL} \
+	-m ${VMMEM} -c ${VMCPUS} ${USB} -u ${VMUSER} -g ${DISPLAY} \
+	-d "${NEW_DESC}" ${NEWPROFILE}

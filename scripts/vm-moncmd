@@ -1,0 +1,81 @@
+#!/bin/bash
+
+# send a command to the qemu monitor 
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} -c <cmd>  profile
+
+    -c cmd   command to send VM monitor
+
+USE
+}
+
+
+################################################################################
+# send messages to user and syslog
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+
+################################################################################
+# main
+
+cmd=
+
+while getopts :c: o
+do
+	case $o in
+		c) cmd="$OPTARG";;
+		*) usage; exit 1;;
+	esac
+done
+shift $(($OPTIND-1))
+
+profile=$1
+
+if [ -z "$profile" -o -z "$cmd" ]
+then
+    usage
+    exit 1
+elif [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+    err "profile \"$profile\" does not exist."
+    exit 1
+fi
+
+# make sure VM is running
+pid=$(vm-status -b ${profile} 2>&1)
+if [ $? -eq 1 ]
+then
+	log "\"$profile\" is not running."
+	exit 0
+fi
+
+
+qmoncmd.py -s ${SOCKDIR}/${profile} -c "$cmd"

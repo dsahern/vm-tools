@@ -1,0 +1,143 @@
+#!/bin/sh
+#
+# vmtools  initializations for using vm-tools infrastructure
+#
+#
+# chkconfig: 2345 11 89
+# description: initializations for using vm-tools infrastructure
+### BEGIN INIT INFO
+# Provides: $vmtools
+### END INIT INFO
+
+# Source function library.
+. /etc/init.d/functions
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc/}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+
+function create_vm_grp
+{
+	grep -q $VM_GRP /etc/group 2>/dev/null
+	if [ $? -ne 0 ]
+	then
+		groupadd $VM_GRP
+		[ $? -ne 0 ] && echo "failed to create $VM_GRP group"
+	fi
+}
+
+function load_kvm_modules
+{
+	echo "Loading kvm module"
+	for m in kvm-intel kvm-amd vhost-net
+	do
+		modprobe $m && sleep 1
+	done
+	
+	if [ ! -e /dev/kvm ]
+	then
+		lsmod | grep -q kvm
+		if [ $? -ne 0 ]
+		then
+			echo "KVM module failed to laod"
+		else
+			echo "KVM module is loaded, but /dev/kvm does not exist."
+			echo "Verify you have a VT capable microprocessor and that"
+			echo "Virtualization Technology option is enabled in your"
+			echo "system's BIOS." 
+		fi
+	fi
+}
+
+function do_start
+{
+	if [ -f /var/lock/subsys/vmtools ]
+	then
+		echo "vmtools already configured"
+		return 1
+	fi
+
+	load_kvm_modules
+
+	# create host bridge
+	hostbr.sh -c
+
+	# make sure group eixsts
+	[ -n "$VM_GRP" ] && create_vm_grp
+
+	# cleanup temporary files and set permissions
+	for d in ${SOCKDIR} ${PIDDIR}
+	do
+		[ -z "${d}" ] && continue
+		mkdir -p ${d}
+		rm -f ${d}/*
+		chmod 1770 ${d}
+		chgrp ${VM_GRP} ${d}
+	done
+
+	for d in /dev/kvm /dev/vhost-net
+	do
+		if [ -e ${d} ]
+		then
+			chgrp $VM_GRP $d
+			chmod 660 $d
+		fi
+	done
+
+	touch /var/lock/subsys/vmtools
+}
+
+function do_stop
+{
+	local vms
+	local pid
+
+	cd $VM_DIR
+	vms=$(ls *.dat 2>/dev/null)
+	for v in $vms
+	do
+		pid=$(vm-status -b ${v/.dat/})
+		if [ $? -eq 0 ]
+		then
+			echo "${0##*/}: stopping ${v/.dat/}"
+			vm-terminate $v
+			# we really have no means of knowing if 
+			# the VM is responding, but give it a few
+			# seconds to begin the shutdown
+			sleep 5
+		fi
+	done
+
+	# delete host bridge
+	hostbr.sh -d
+
+	rm -f /var/lock/subsys/vmtools
+}
+
+function do_status
+{
+	vm-list
+
+	if [ -n "$MAINBR" ]
+	then
+		echo "main bridge $MAINBR:"
+		ifconfig $MAINBR
+	fi
+
+	hostbr.sh -s
+
+	brctl show
+}
+
+case "$1" in
+  start)  do_start;;
+  stop)   do_stop;;
+  status) do_status;;
+  *)
+        echo $"Usage: $0 {start|stop|status}"
+        exit 1
+esac
+
+exit $?
+
+# vim: ts=4 noexpandtab

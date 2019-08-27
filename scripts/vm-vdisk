@@ -1,0 +1,320 @@
+#!/bin/bash
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+if [ $UID -eq 0 ]
+then
+	LOSETUP="losetup"
+	MOUNT="mount"
+	UMOUNT="umount"
+else
+	LOSETUP="sudo losetup"
+	MOUNT="sudo mount"
+	UMOUNT="sudo umount"
+fi
+
+
+################################################################################
+#
+# look at disk partition
+
+# TO-DO: works only for intel based distributions; parted handles PPC
+function find_start_sector
+{
+	local f=$1
+	local p=$2
+
+	echo -e "
+unit s
+print
+quit" | parted $f |\
+	while read n s e sz fs other
+	do
+		if [ "$n" = "$p" ]
+		then
+			echo ${s/s}
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+
+################################################################################
+#
+
+function find_loop_dev
+{
+	local d
+
+	d=$($LOSETUP -j $1 | awk '{print $1}')
+	d=${d/:}
+	[ -z "$d" ] && return 1
+
+	echo $d
+	return 0
+}
+
+function find_mnt_path
+{
+	local d=$1
+	local p
+
+	p=$(mount | awk -v d="$d" '$1 == d {print $3}')
+	if [ -z "$p" ]
+	then
+		#echo "Failed to find mount point for device $d" >&2
+		return 1
+	fi
+
+	echo $p
+	return 0
+}
+
+################################################################################
+#
+
+function do_mount
+{
+	local file=$1
+
+	if [ -z "$file" ]
+	then
+	    err "disk does not exist"
+	    exit 1
+	fi
+	if [ ! -e $file ]
+	then
+	    err "${file} does not exist"
+	    exit 1
+	fi
+
+	local d=$(find_loop_dev $file)
+	if [ -n "$d" ]
+	then
+		echo "disk already mounted"
+		return 1
+	fi
+
+	if [ $SECTOR -gt 0 ]
+	then
+		STARTSEC=$SECTOR
+	else
+		STARTSEC=$(find_start_sector $FILE $PART)
+	fi
+	if [ -z "$STARTSEC" ]
+	then
+	    echo "failed to get starting sector for $FILE"
+	    exit 1
+	fi
+
+	DEV=$($LOSETUP -o $(($STARTSEC * 512)) -f -v $FILE)
+	[ $? -eq 0 -a -z "$DEV" ] && DEV=$($LOSETUP -j $FILE | awk -F ':' '{print $1}')
+	DEV=${DEV/* }
+	if [ -z "$DEV" ]
+	then
+	    echo "failed to setup loopback device for $FILE"
+	    exit 1
+	fi
+
+	mkdir -p $MNT
+	if [ $? -ne 0 ]
+	then
+	    echo "failed to create $MNT mount point"
+	    $LOSETUP -d $DEV
+	
+	    exit 1
+	fi
+	
+	$MOUNT $DEV $MNT
+	if [ $? -ne 0 ]
+	then
+	    echo "failed to mount $DEV at $MNT"
+	    $LOSETUP -d $DEV
+	
+	    exit 1
+	fi
+
+	echo "VM disk mounted at $MNT"
+	if [ -n "$profile" ]
+	then
+		echo "When done remember to run: ${0##*/} -u $profile"
+	fi
+}
+
+################################################################################
+#
+
+function do_umount
+{
+	local file="$1"
+	local f
+	local d
+	local p
+
+	for f in $file
+	do
+		d=$(find_loop_dev $file)
+		[ -z "$d" ] && continue
+
+		p=$(find_mnt_path $d)
+	    if [ -n "$p" ]
+	    then
+	        $UMOUNT $p
+	        if [ $? -ne 0 ]
+	        then
+	            echo "failed to unmount $f." >&2
+				continue
+	        fi
+
+			if [ -f $p/remove-me ]
+			then
+				rm -f $p/remove-me
+				rmdir $p
+			fi
+		fi
+
+	    $LOSETUP -d $d
+        [ $? -ne 0 ] && echo "losetup failed for $f"
+	done
+}
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} OPTS profile
+
+to mount a disk partition:
+
+	-p part   partition to mount
+	-s sector start sector for mount
+	-m mnt    mount point to use
+	-d disk   disk number to mount (default is first)
+
+to unmount a disk partition
+	-u        unmount request
+	-d disk   disk number to umount (default is first)
+	-a        unmount all disks
+USE
+}
+
+################################################################################
+# send messages to user and syslog
+
+function err 
+{
+	echo "$*" >&2
+	logger -t ${0##*/} "ERROR: $*"
+}
+
+function log 
+{
+	echo "$*" 
+	logger -t ${0##*/} "$*"
+}
+
+################################################################################
+# main
+
+ACTION=mount
+MNT=
+RMMNT=yes
+declare -i PART=0
+declare -i SECTOR=0
+declare -i DISK=1
+FILE=
+
+while getopts :p:m:uas:f: o
+do
+	case $o in
+		p) PART=$OPTARG;;
+		m) MNT=$OPTARG; RMMNT=no;;
+		d) DISK=$OPTARG;;
+	    u) ACTION=umount;;
+	    s) SECTOR=$OPTARG;;
+	    a) DISK=0;;
+	    f) FILE=$OPTARG;;
+		*) usage; exit 1;;
+	esac
+done
+shift $(($OPTIND-1))
+
+profile=$1
+
+if [ "$ACTION" = "mount" ]
+then
+	status=$(vm-status -b $profile)
+	if [ $? -eq 0 -a "$DRYRUN" != "yes" ]
+	then
+		log "This VM ($profile) is running (pid $status). Can not mount disk."
+		exit 1
+	fi
+
+	if [ $PART -eq 0 -a $SECTOR -eq 0 ]
+	then
+		usage
+		exit 1
+	fi
+
+	if [ -z "$MNT" ]
+	then
+		MNT=$(mktemp -d /tmp/vdisk.XXXXXXXX)
+		[ $? -ne 0 ] && exit 1
+		[ $RMMNT = "yes" ] && touch $MNT/remove-me
+	fi
+fi
+
+if [ -z "$FILE" ]
+then
+	if [ -z "$profile" ]
+	then
+		usage
+		exit 1
+	elif [ ! -f ${VM_DIR}/${profile}.dat ]
+	then
+		err "profile \"$profile\" does not exist."
+		exit 1
+	fi
+
+	. ${VM_DIR}/${profile}.dat
+
+
+	if [ $DISK -eq 0 ]
+	then
+		FILE=${VMDISKS}
+	else
+		declare -i cnt=0
+		for d in ${VMDISKS}
+		do
+	    	cnt=$((cnt+1))
+	
+	    	if [ $cnt -eq $DISK ]
+	    	then
+		    	FILE=$d
+		    	break
+	    	fi
+		done
+	fi
+fi
+
+FILE=$(readlink -f $FILE)
+if [ "$ACTION" = "mount" ]
+then
+	do_mount $FILE
+else
+	do_umount $FILE
+fi
+
+exit 0

@@ -1,0 +1,31 @@
+#!/bin/sh
+
+# bring up interface and add it to the main bridge
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+dev=$1
+
+if [ -z "$dev" ]
+then
+    echo "usage: ${0##*/} device"
+    exit 1
+fi
+
+ifconfig $dev 0.0.0.0 up
+if [ $? -ne 0 ]
+then
+    echo "failed to bringup device $dev" >&2
+    exit 1
+fi
+
+brctl addif $MAINBR $dev
+if [ $? -ne 0 ]
+then
+    echo "failed to add device $dev to $MAINBR bridge" >&2
+    ifconfig $dev down
+    exit 1
+fi
+
+exit 0

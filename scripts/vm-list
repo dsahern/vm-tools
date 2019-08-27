@@ -1,0 +1,127 @@
+#!/bin/bash
+
+# This script is used to see all VMs that have been created on this host,
+# and list their process ID if running.
+
+VMTOOLSCONF=${VMTOOLSCONF:=//home/dsa/vm/vm-tools}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+#
+# show usage for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} [-u user | -m | -a]
+
+    -u user    show only VMs owned by specified user
+    -m         show only VMs owned by me (user running script)
+    -r         show only VMs currently running
+    -a         show all VMs (default)
+USE
+}
+
+################################################################################
+# main
+
+SHOW_USER=
+RUNNING_ONLY=no
+RUN_ARG=
+while getopts :armu: o
+do
+	case $o in
+		a) SHOW_USER=;;
+		r) RUNNING_ONLY=yes; RUN_ARG="-r";;
+		m) if [ -z "$USER" ]; then
+		       echo "USER environment variable not set" >&2
+		       exit 1
+		   fi
+		   SHOW_USER="$USER"
+		   ;;
+		u) SHOW_USER="$OPTARG";;
+		*) usage; exit 1;;
+	esac
+done
+
+if [ $UID -ne 0 ]
+then
+	if [ -z "$SHOW_USER" ]
+	then
+		exec sudo ${VMTOOLS}/${0##*/} -a $RUN_ARG
+	else
+		exec sudo ${VMTOOLS}/${0##*/} -u "$SHOW_USER" $RUN_ARG
+	fi
+	exit 1
+fi
+
+#
+# each dat file in the vm directory is assumed to be a VM profile
+#
+cd $VM_DIR
+VMS=$(find . -name '*.dat' | sed -e 's#^\./##')
+if [ -z "$VMS" ]
+then
+	echo "no VMs have been configured"
+	exit 0
+fi
+
+FMT="%4s   %-16s   %-10s   %-5s   %-15s   %s\n"
+echo
+printf "$FMT" "  Id" "Profile" "Owner" "PID  " "IP Address" "Description"
+printf "$FMT" "  --" "----------------" "----------" "-----" "---------------" "----------------"
+(
+declare -i numvm=0
+for vm in $VMS
+do
+	. ${VM_DIR}/${vm}
+
+	if [ -z "$VMID" ]
+	then
+		echo "$vm does not have a VMID" >&2
+		VMID="-"
+	fi
+	
+	desc=$(awk -F'=' '$1 == "DESC" {print}' $vm)
+
+	status=$(vm-status -b ${vm/.dat/})
+	if [ "$RUNNING_ONLY" = "yes" -a "$status" = "-" ]
+	then
+		continue
+	fi
+
+	owner=$(awk -F '=' '$1 == "VMUSER" {print $2}' ${VM_DIR}/${vm})
+	[ -z "$owner" ] && owner="[unknown]"
+
+	[ -n "$SHOW_USER" -a "$SHOW_USER" != "$owner" ] && continue
+
+	ip=$(configure-dnsmasq.sh -s ${vm} 2>/dev/null)
+	if [ -z "$ip" ]; then
+		id=${VMID}
+		[ ${id} = "08" ] && id=8
+		[ ${id} = "09" ] && id=9
+		ip=$(printf "$HOSTBR_PREFIX.%d *" "${id}")
+	fi
+
+	printf "$FMT" $VMID "${vm/.dat/}" "$owner" "$status" "$ip" "$DESC" 
+	unset VMID
+	unset DESC 
+
+	numvm=$((numvm+1))
+done
+
+if [ $numvm -eq 0 ]
+then
+	echo "<none>"
+fi
+) | sort -g -k 1,1
+
+exit 0

@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# This script is used to create a profile for a virtual machine.
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc/}
+. ${VMTOOLSCONF}/vm-tools.conf
+
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+
+################################################################################
+# help for this script
+
+function usage
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} {-c|-d} username
+
+	-c   create user
+	-d   delete user
+USE
+}
+
+
+function create_user
+{
+	local name="$1"
+
+	useradd -g ${VM_GRP} -s "/sbin/nologin" -p '!!' -M -d /dev/null $name 2>/dev/null
+	if [ $? -ne 0 ]
+	then
+		err "failed to create user \"$name\" for this VM."
+		return 1
+	else
+		log "created user \"$name\""
+	fi
+
+	return 0
+}
+
+
+function delete_user
+{
+	local name="$1"
+	local rc=1
+
+	case "$name" in
+       	root) log "not deleting root user";;
+	
+       	${VM_USER}[0-9]*)
+	    userdel -f $name
+	    rc=$?
+	    if [ $rc -eq 0 ]
+	    then
+	        log "deleted user $name"
+	    else
+	        err "failed to delete user $name"
+	    fi
+	    ;;
+	
+       	*) log "not deleting user \"$name\" - does not meet expected name format"
+		;;
+	esac
+
+	return $rc
+}
+
+################################################################################
+#
+
+function err 
+{
+	echo "$*" >&2
+}
+
+function log 
+{
+	echo "$*" 
+}
+
+################################################################################
+#
+# main
+
+ACTION=none
+
+while getopts :dc o
+do
+	case $o in
+		c) ACTION=create;;
+		d) ACTION=delete;;
+		*) usage; exit 1;;
+	esac
+done
+shift $((${OPTIND}-1))
+
+if [ -z "$1" ]
+then
+	usage
+	exit 1
+fi
+NAME=$1
+
+case "$ACTION" in
+	create) create_user $NAME;;
+	delete) delete_user $NAME;;
+	*) usage; /bin/false;;
+esac
+
+exit $?

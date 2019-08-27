@@ -1,0 +1,65 @@
+#!/bin/bash
+
+# This script is used to pin virtual cpus to physical cpus.
+
+VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+. ${VMTOOLSCONF}/vm-tools.conf
+if [ -z "$VMTOOLS" ]
+then
+	echo "VMTOOLS path not set." >&2
+	exit 1
+fi
+
+################################################################################
+# help for this script
+
+function usage()
+{
+	cat >&2 <<USE
+
+usage: ${0##*/} <profile> mask-vcpu1 mask-vcpu2 ...
+
+e.g., "${0##*/} myvm 1 2 4 8" will pin the virtual cpus of myvm as follows:
+vcpu0 --> pcpu0, vcpu1 --> pcpu1, vcpu2 --> pcpu2 and vcpu3 --> pcpu3.
+
+USE
+}
+
+################################################################################
+# main
+
+profile=$1
+if [ -z "$profile" ]
+then
+	usage
+	exit 1
+fi
+shift
+
+if [ ! -f ${VM_DIR}/${profile}.dat ]
+then
+	err "profile does not exist"
+	exit 1
+fi
+
+SOCK="$SOCKDIR/${profile}"
+if [ ! -e "$SOCK" ]
+then
+	err "$SOCK does not exist" >&2
+	exit 2
+fi
+
+declare -i cpu=0
+qmoncmd.py -s $SOCK -c 'info cpus' | sed  -e 's/^M//' | awk '{print $NF}' |\
+while read tid; do
+    case $tid in
+        thread_id=*) tid=${tid/thread_id=/}
+		a=$1
+		shift
+		[ -n "$a" ] && taskset -p $a $tid
+		cpu=$(($cpu+1))
+		;;
+    esac
+done
+
+exit 0
