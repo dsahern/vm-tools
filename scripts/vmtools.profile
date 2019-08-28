@@ -2,7 +2,7 @@
 
 # Add path to vm-tools scripts and kvm binaries to path.
 
-VMTOOLSCONF=/etc/vm-tools.conf
+VMTOOLSCONF=__VMTOOLS_DIR__/vm-tools.conf
 . ${VMTOOLSCONF}
 
 if [ -z "$VMTOOLS" ]

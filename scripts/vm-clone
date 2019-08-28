@@ -2,7 +2,7 @@
 
 # Command to clone a VM
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 if [ -z "$VMTOOLS" ]

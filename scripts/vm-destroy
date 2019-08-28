@@ -3,7 +3,7 @@
 # This script is used to free resources allocated to a VM and destroy
 # the profile.
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 if [ -z "$VMTOOLS" ]

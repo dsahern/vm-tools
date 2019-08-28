@@ -3,7 +3,7 @@
 # script to configure, delete and show the status of the host-only
 # bridge. Name and network configuration comes from vm-tools.conf
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 if [ -z "$HOSTBR" ]
 then

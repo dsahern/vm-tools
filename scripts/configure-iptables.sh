@@ -2,7 +2,7 @@
 
 # Generate a default dnsmasq configuration
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 SYSCFG=/etc/sysconfig/iptables

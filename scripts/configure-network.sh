@@ -1,8 +1,8 @@
-#!/bin/sh
+#!/bin/bash
 
 # This script configures the main bridge and its interface
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 if [ -z "$MAINBR_ETH" ]

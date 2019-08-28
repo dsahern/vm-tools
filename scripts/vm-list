@@ -3,7 +3,7 @@
 # This script is used to see all VMs that have been created on this host,
 # and list their process ID if running.
 
-VMTOOLSCONF=${VMTOOLSCONF:=//home/dsa/vm/vm-tools}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 if [ -z "$VMTOOLS" ]

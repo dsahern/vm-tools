@@ -3,7 +3,7 @@
 # This script determines the status of a particular VM -- i.e,
 # whether it is running or not and if so, it's PID.
 
-VMTOOLSCONF=${VMTOOLSCONF:=/home/dsa/vm/vm-tools}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 if [ -z "$VMTOOLS" ]

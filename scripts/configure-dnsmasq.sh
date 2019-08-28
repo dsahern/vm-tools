@@ -2,7 +2,7 @@
 
 # Configure dnsmasq for use on host-only bridge
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 DNSMASQ_D=/etc/dnsmasq.d

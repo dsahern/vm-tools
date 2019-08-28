@@ -12,7 +12,7 @@
 # Source function library.
 . /etc/init.d/functions
 
-VMTOOLSCONF=${VMTOOLSCONF:=/etc/}
+VMTOOLSCONF=${VMTOOLSCONF:=__VMTOOLS_DIR__}
 . ${VMTOOLSCONF}/vm-tools.conf
 
 
