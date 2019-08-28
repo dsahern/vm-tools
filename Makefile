@@ -5,6 +5,12 @@ DESTDIR=/opt
 endif
 INSTALLBASE=$(DESTDIR)/vm-tools
 
+ifeq ($(BUILDROOT),)
+INSTALL_FULL=$(DESTDIR)/vm-tools
+else
+INSTALL_FULL=$(BUILDROOT)/$(DESTDIR)/vm-tools
+endif
+
 #
 # Global proj. directory paths
 #
@@ -29,13 +35,12 @@ rpm:
 	echo "=======$(PROJDIR): make rpm is done======="
 
 install:
-	mkdir -p $(INSTALLBASE)/vm $(INSTALLBASE)/pids $(INSTALLBASE)/sockets
-	mkdir -p $(INSTALLBASE)/log $(INSTALLBASE)/bin
-	sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," config/vm-tools.conf > $(INSTALLBASE)/vm-tools.conf
-	ls -C1 scripts | while read f; do sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," scripts/$$f > $(INSTALLBASE)/bin/$$f; done
+	mkdir -p $(INSTALL_FULL)/vm $(INSTALL_FULL)/pids $(INSTALL_FULL)/sockets
+	mkdir -p $(INSTALL_FULL)/log $(INSTALL_FULL)/bin
+	sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," config/vm-tools.conf > $(INSTALL_FULL)/vm-tools.conf
+	ls -C1 scripts | while read f; do sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," scripts/$$f > $(INSTALL_FULL)/bin/$$f; done
 
 uninstall:
-	INSTALLBASE=$(DESTDIR)/vm-tools
 	rm -rf $(INSTALLBASE)/vm $(INSTALLBASE)/pids $(INSTALLBASE)/sockets
 	rm -rf $(INSTALLBASE)/log $(INSTALLBASE)/bin $(INSTALLBASE)/vm-tools.conf
 	rmdir $(INSTALLBASE)

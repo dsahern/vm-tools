@@ -7,7 +7,7 @@ License: GPL
 BuildRoot: %{_tmppath}/%{name}
 Vendor: None
 Packager: David Ahern
-Requires: tunctl, bridge-utils
+Requires: iproute
 
 %description
 This package provides a few wrapper scripts for controlling virtual guests.
@@ -21,46 +21,41 @@ exit 0
 mkdir -p ${RPM_BUILD_ROOT}
 
 pushd ${PROJDIR}
-INSTALLBASE=${RPM_BUILD_ROOT}/etc/vm-tools
 
-mkdir -p $INSTALLBASE/vm
-mkdir -p $INSTALLBASE/pids
-mkdir -p $INSTALLBASE/sockets
-mkdir -p $INSTALLBASE/log
+make BUILDROOT=${RPM_BUILD_ROOT} DESTDIR=/opt install
+
+INSTALLBASE=${RPM_BUILD_ROOT}/opt/vm-tools
 chmod 1770 $INSTALLBASE/pids
 chmod 1770 $INSTALLBASE/sockets
 chmod 1770 $INSTALLBASE/vm
 chmod 0750 $INSTALLBASE/log
-cp -rp scripts $INSTALLBASE
-
-cp -p config/*.conf ${RPM_BUILD_ROOT}/etc/
 
 mkdir -p ${RPM_BUILD_ROOT}/etc/rc.d/init.d
-mv ${INSTALLBASE}/scripts/vmtools.rc ${RPM_BUILD_ROOT}/etc/rc.d/init.d/vmtools
+mv ${INSTALLBASE}/bin/vmtools.rc ${RPM_BUILD_ROOT}/etc/rc.d/init.d/vmtools
 
 mkdir -p ${RPM_BUILD_ROOT}/etc/profile.d
-mv ${INSTALLBASE}/scripts/vmtools.profile ${RPM_BUILD_ROOT}/etc/profile.d/vmtools.sh
+mv ${INSTALLBASE}/bin/vmtools.profile ${RPM_BUILD_ROOT}/etc/profile.d/vmtools.sh
 
 mkdir -p ${RPM_BUILD_ROOT}/etc/sudoers.d
-mv ${INSTALLBASE}/scripts/sudoers.cnf ${RPM_BUILD_ROOT}/etc/sudoers.d/vmtools
+mv ${INSTALLBASE}/bin/sudoers.cnf ${RPM_BUILD_ROOT}/etc/sudoers.d/vmtools
 chmod 0440 ${RPM_BUILD_ROOT}/etc/sudoers.d/vmtools
 
-cp -p README ${INSTALLBASE}
+cp -p README.md ${INSTALLBASE}
 
 (
 cd ${RPM_BUILD_ROOT}
 find . -type f | sed -e 's,./,/,' | grep -v vmtools.conf
-echo "/etc/vm-tools/vm"
-echo "/etc/vm-tools/pids"
-echo "/etc/vm-tools/sockets"
-echo "/etc/vm-tools/log"
+echo "/opt/vm-tools/vm"
+echo "/opt/vm-tools/pids"
+echo "/opt/vm-tools/sockets"
+echo "/opt/vm-tools/log"
 ) > %{_tmppath}/%{name}.files
 
 popd
 
 
 %post
-. /etc/vm-tools.conf
+. /opt/vm-tools/vm-tools.conf
 s=$(awk -F':' '$1 == "'${VM_GRP}'" {print "exists"}' /etc/group)
 if [ "$s" != "exists" ]
 then
@@ -72,24 +67,15 @@ chgrp $VM_GRP $PIDDIR $SOCKDIR $VM_DIR
 
 mkdir -p $IMGDIR && chgrp virt $IMGDIR && chmod 1775 $IMGDIR
 
-chkconfig vmtools on
-
-echo -e "\nSee /etc/vm-tools/README for configuring server.\n\n"
-
-grep -q VMHOSTBR $VM_DIR/*.dat
-if [ $? -eq 0 ]
-then
-	echo "Please run convert-vm-nics.sh to convert existing VMs to the new"
-	echo "network configuration."
-fi
+echo -e "\nSee /opt/vm-tools/README.md for configuring server.\n\n"
 
 exit 0
 
 %preun
 if [ "$1" = "0" ]
 then
-    service vmtools stop
-    chkconfig vmtools off
+	# keep this for future additions
+	:
 fi
 
 exit 0
@@ -97,9 +83,12 @@ exit 0
 
 %files -f %{_tmppath}/%{name}.files
 %defattr(-,root,root)
-%config(noreplace) /etc/vm-tools.conf
+%config(noreplace) /opt/vm-tools/vm-tools.conf
 
 
 %changelog
+ * Wed Aug 28 2019 12:58:44  David S. Ahern <dsahern@@gmail.com>
+ - update to remove dependence on legacy networking tools
+ - update to use install target in Makefile
  * Fri Jun 06 2008 10:42:40  David S. Ahern <dsahern@@gmail.com>
  - initial version
