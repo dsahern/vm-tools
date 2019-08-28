@@ -121,12 +121,12 @@ function do_status
 	if [ -n "$MAINBR" ]
 	then
 		echo "main bridge $MAINBR:"
-		ifconfig $MAINBR
+		ip addr show dev $MAINBR
 	fi
 
 	hostbr.sh -s
 
-	brctl show
+	ip link show type bridge
 }
 
 case "$1" in

@@ -1,6 +1,5 @@
 
 
-%virt ALL=(root) NOPASSWD: /usr/sbin/tunctl, /sbin/ifconfig, /usr/sbin/brctl
 %virt ALL=(root) NOPASSWD: __VMTOOLS_DIR__/bin/configure-dnsmasq.sh
 %virt ALL=(root) NOPASSWD: __VMTOOLS_DIR__/bin/vm-list
 %virt ALL=(root) NOPASSWD: /bin/mount, /bin/umount, /sbin/kpartx, /sbin/losetup

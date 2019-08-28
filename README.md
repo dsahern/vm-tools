@@ -13,7 +13,7 @@ After installing the rpm
 
 Verify network settings are ok with your installation. Specifically, look at
 the MAINBR_ETH setting and make sure it agrees with the  server's primary
-connection (see output of ifconfig as to which interface has the LAN address).
+connection (see output of 'ip addr show' for which interface has the LAN address).
 Update the address for the host-only network, HOSTBR_PREFIX, if desired.
 
 If the VM_DIR, PIDDIR, and SOCKDIR variables are changed be sure to create the

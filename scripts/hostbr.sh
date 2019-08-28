@@ -29,13 +29,13 @@ USE
 
 function config_bridge
 {
-	if [ -n "$HOSTBR_IP" -a -n "$HOSTBR_MASK" ]
+	if [ -n "$HOSTBR_IP" ]
 	then
 		echo "configuring $HOSTBR with IP $HOSTBR_IP and mask $HOSTBR_MASK"
-		ifconfig $HOSTBR $HOSTBR_IP netmask $HOSTBR_MASK up
+		ip addr add dev $HOSTBR $HOSTBR_IP up
 	else
 		echo "bringing up $HOSTBR with no IP"
-		ifconfig $HOSTBR up
+		ip link set dev $HOSTBR up
 	fi
 	if [ $? -ne 0 ]
 	then
@@ -43,13 +43,12 @@ function config_bridge
 		return 1
 	fi
 
-	# NOTE: the mtu setting does not 'stick' until a device is
-	#	   connected to it (e.g., tap using brctl addif). nonetheless,
-	#	   it feels right to have this here - so at least it is not
-	#	   forgotten.
+	# NOTE: the mtu setting does not 'stick' until a device is enslaved.
+	#	nonetheless, it feels right to have this here - so at least it
+	#	is not forgotten.
 	if [ -n "$HOSTBR_MTU" ]
 	then
-		ifconfig $HOSTBR mtu $HOSTBR_MTU
+		ip link set dev $HOSTBR mtu $HOSTBR_MTU
 		if [ $? -ne 0 ]
 		then
 			echo "failed to set MTU on host-only bridge"
@@ -57,13 +56,12 @@ function config_bridge
 	fi
 }
 
-
 ################################################################################
 # standard linux bridge versions
 
 function create
 {
-	ifconfig $HOSTBR 1>/dev/null 2>&1
+	ip link show dev $HOSTBR 1>/dev/null 2>&1
 	if [ $? -eq 0 ]
 	then
 		echo "host-only bridge already configured" >&2
@@ -71,7 +69,7 @@ function create
 	fi
 
 	echo "creating host-only bridge"
-	brctl addbr $HOSTBR
+	ip link add $HOSTBR type bridge forward_delay 0
 	if [ $? -ne 0 ]
 	then
 		echo "failed to create host-only bridge"
@@ -80,24 +78,20 @@ function create
 
 	config_bridge || return 1
 
-	brctl setfd $HOSTBR 0
-
 	return 0
 }
 
 function delete
 {
 	echo "deleting host-only bridge"
-	ifconfig $HOSTBR down
-	brctl delbr $HOSTBR
+	ip link delete $HOSTBR
 }
 
 function status
 {
 	echo "host-only bridge $HOSTBR:"
-	ifconfig $HOSTBR
+	ip addr show dev $HOSTBR
 }
-
 
 ################################################################################
 # openswitch versions
