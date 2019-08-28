@@ -38,7 +38,10 @@ install:
 	mkdir -p $(INSTALL_FULL)/vm $(INSTALL_FULL)/pids $(INSTALL_FULL)/sockets
 	mkdir -p $(INSTALL_FULL)/log $(INSTALL_FULL)/bin
 	sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," config/vm-tools.conf > $(INSTALL_FULL)/vm-tools.conf
-	ls -C1 scripts | while read f; do sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," scripts/$$f > $(INSTALL_FULL)/bin/$$f; done
+	ls -C1 scripts | while read f; do \
+		sed -e "s,__VMTOOLS_DIR__,$(INSTALLBASE)," scripts/$$f > $(INSTALL_FULL)/bin/$$f; \
+		chmod 755 $(INSTALL_FULL)/bin/$$f; \
+	done
 
 uninstall:
 	rm -rf $(INSTALLBASE)/vm $(INSTALLBASE)/pids $(INSTALLBASE)/sockets
