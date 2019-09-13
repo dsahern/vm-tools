@@ -1,0 +1,47 @@
+# Copy this file to /etc/netns/vms/network/interfaces
+# configures a default setup for vms network namespace via ifupdown2.
+
+# This file describes the network interfaces available on your system
+# and how to activate them. For more information, see interfaces(5).
+
+source /etc/network/interfaces.d/*
+
+# The loopback network interface
+auto lo
+iface lo inet loopback
+
+%for i in range(2,9):
+auto vrf${i}
+iface vrf${i}
+	vrf-table auto
+%endfor
+
+# dummy interfaces are used to trick ifupdown2 into creating bridges
+%for i in range(0,9):
+auto dummy${i}
+iface dummy${i}
+	link-type dummy
+%endfor
+
+auto br0
+iface br0
+	address 10.1.1.254/24
+	#address 2001:db8::64/64
+	bridge-ports dummy0
+	post-ifup ip link set veth-out master br0
+	post-ifup ip link set veth-out up
+
+auto br1
+iface br1
+	address 10.100.1.254/24
+	address 2001:db8:1::64/64
+	bridge-ports dummy1
+
+%for i in range(2,9):
+auto br${i}
+iface br${i}
+	address 10.100.${i}.254/24
+	address 2001:db8:${i}::64/64
+	bridge-ports dummy${i}
+	vrf vrf${i}
+%endfor
