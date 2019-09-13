@@ -10,7 +10,7 @@ then
 fi
 
 IP='sudo ip'
-OVSCTL="/usr/local/bin/ovs-vsctl"
+OVSCTL="/usr/bin/ovs-vsctl"
 LOSETUP="sudo losetup"
 TAPDEVS=
 
